@@ -2,7 +2,7 @@
   "botName": "InstaBOT",
   "prefix": "-",
   "language": "en",
-  "adminBot": [],
+  "adminBot": ["52943709733"],
   "nickNameOnStart": "InstaBOT",
   "env": {
     "token": "chat.api.toke.neokex.ica.token.can.change.a9y.2ime.ok",
