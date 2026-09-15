@@ -786,6 +786,104 @@ async function main() {
 		}
 	});
 
+	await test("cmd: URL-only install derives the file name and replies", async () => {
+		const api = fakeApi();
+		const db = makeDatabase();
+		const fileName = "autourl_" + Date.now().toString(36) + ".js";
+		const originalFetch = global.fetch;
+		const code = 'module.exports = { config: { name: "zzzautourl", category: "custom", description: { en: "x" } }, onStart: async ({ message }) => message.reply("url-only ok") };';
+		global.fetch = async () => ({ ok: true, text: async () => code });
+		try {
+			const out = await runCommand(`-cmd install https://example.com/${fileName}`, { api, db, config: makeConfig() });
+			assert.ok(/Installed "zzzautourl"/.test(out), "URL-only install should confirm success, got: " + out);
+			assert.ok(registry.resolve("zzzautourl"), "the URL-only command must be live");
+		}
+		finally {
+			global.fetch = originalFetch;
+			registry.unregisterCommand("zzzautourl");
+			try { require("fs").unlinkSync(require("path").join(__dirname, "..", "commands", fileName)); } catch (_) { }
+		}
+	});
+
+	await test("cmd: URL install reports load errors and removes the broken file", async () => {
+		const api = fakeApi();
+		const db = makeDatabase();
+		const fileName = "brokenurl_" + Date.now().toString(36) + ".js";
+		const originalFetch = global.fetch;
+		const code = 'const missing = require("module-that-does-not-exist"); module.exports = { config: { name: "zzzbrokeurl", category: "custom" }, onStart: async () => missing };';
+		global.fetch = async () => ({ ok: true, text: async () => code });
+		const dest = require("path").join(__dirname, "..", "commands", fileName);
+		try {
+			const out = await runCommand(`-cmd install https://example.com/${fileName}`, { api, db, config: makeConfig() });
+			assert.ok(/Install failed/i.test(out), "the dependency error must be reported, got: " + out);
+			assert.ok(!require("fs").existsSync(dest), "a failed install must not leave a broken file");
+		}
+		finally {
+			global.fetch = originalFetch;
+			try { require("fs").unlinkSync(dest); } catch (_) { }
+		}
+	});
+
+	await test("bby: uses the native API port without axios", async () => {
+		const api = fakeApi();
+		const db = makeDatabase();
+		const originalFetch = global.fetch;
+		let requested = null;
+		global.fetch = async url => {
+			requested = String(url);
+			return { ok: true, json: async () => ({ reply: "bby says hello" }) };
+		};
+		try {
+			const out = await runCommand("bby hello", { api, db, config: makeConfig() });
+			assert.strictEqual(out, "bby says hello");
+			assert.ok(requested && requested.includes("noobs-api.top/dipto/baby"), "expected the baby API to be called");
+			assert.ok(registry.resolve("bby"), "bby must be registered");
+			assert.strictEqual(registry.resolve("bby").config.noPrefix, true, "bby must run without the prefix");
+			assert.strictEqual(registry.resolve("bby").config.author, "dipto", "bby must credit dipto");
+		}
+		finally { global.fetch = originalFetch; }
+	});
+
+	await test("bby: replies use the baby endpoint and re-arm the next reply", async () => {
+		const bby = require(path.join(root, "commands", "bby"));
+		const originalFetch = global.fetch;
+		const requested = [];
+		const sent = [];
+		let firstHandler = null;
+		let nextHandler = null;
+		global.fetch = async url => {
+			requested.push(String(url));
+			return { ok: true, json: async () => ({ reply: requested.length === 1 ? "first answer" : "second answer" }) };
+		};
+		const makeMessage = () => ({
+			reply: async body => {
+				sent.push(String(body));
+				return { messageID: "bby-message-" + sent.length };
+			}
+		});
+		try {
+			await bby.onStart({
+				message: makeMessage(),
+				args: ["hello"],
+				event: { type: "message", senderID: "42", threadID: "t", messageID: "m" },
+				usersData: makeDatabase().users,
+				setReplyHandler: handler => { firstHandler = handler; }
+			});
+			assert.strictEqual(sent[0], "first answer");
+			assert.ok(firstHandler, "the initial answer must arm a reply handler");
+			await firstHandler({
+				api: fakeApi(),
+				message: makeMessage(),
+				event: { type: "message_reply", senderID: "42", threadID: "t", messageID: "r", body: "again" },
+				setReplyHandler: handler => { nextHandler = handler; }
+			});
+			assert.strictEqual(sent[1], "second answer");
+			assert.ok(nextHandler, "each reply must arm the next response");
+			assert.ok(requested[1].includes("noobs-api.top/dipto/baby"), "reply must use the baby endpoint");
+		}
+		finally { global.fetch = originalFetch; }
+	});
+
 	await test("cmd: URL install works with the name before the URL too", async () => {
 		// Regression: `-cmd install ai.js <url>` treated the URL itself as
 		// inline code and wrote the URL text as the file, so the bot failed
@@ -2418,6 +2516,66 @@ async function main() {
 			assert.strictEqual(!!target.rateLimited, false);
 		}
 		finally { utils.download = download; }
+	});
+
+	await test("resolveProfile: an incomplete authenticated profile is filled from the public one", async () => {
+		// getUserInfo can return a 200 without the social counts. The public
+		// profile must fill them in for the same user.
+		const download = utils.download;
+		utils._resetUsernameCache();
+		utils.download = () => Promise.resolve(Buffer.from(JSON.stringify({ data: { user: {
+			id: "777", username: "jane", full_name: "Jane Doe", biography: "hello",
+			edge_followed_by: { count: 42 }, edge_follow: { count: 7 },
+			profile_pic_url_hd: "https://example.com/p.jpg"
+		} } })));
+		try {
+			const api = fakeApi({
+				getUserInfo: (id, cb) => cb(null, { "777": { userID: "777", name: "Jane Doe", vanity: "jane", profilePicture: "https://example.com/p.jpg" } })
+			});
+			const p = await utils.resolveProfile(["777"], {}, api);
+			assert.strictEqual(String(p.userID), "777");
+			assert.strictEqual(p.followers, 42, "followers must be filled in");
+			assert.strictEqual(p.following, 7, "following must be filled in");
+			assert.strictEqual(p.biography, "hello");
+		}
+		finally { utils.download = download; utils._resetUsernameCache(); }
+	});
+
+	await test("resolveProfile: a mismatched public profile never overwrites the right id", async () => {
+		// A handle can collide with an unrelated account; the public result must
+		// be ignored when its id differs from the authenticated one.
+		const download = utils.download;
+		utils._resetUsernameCache();
+		utils.download = () => Promise.resolve(Buffer.from(JSON.stringify({ data: { user: {
+			id: "999999", username: "jane", full_name: "Jane Williamson", biography: "wrong person",
+			edge_followed_by: { count: 1975133 }, edge_follow: { count: 979 }
+		} } })));
+		try {
+			const api = fakeApi({
+				getUserInfo: (id, cb) => cb(null, { "777": { userID: "777", name: "Jane Doe", vanity: "jane", profilePicture: "https://example.com/p.jpg" } })
+			});
+			const p = await utils.resolveProfile(["777"], {}, api);
+			assert.strictEqual(String(p.userID), "777", "the id must stay the requested user's");
+			assert.notStrictEqual(p.followers, 1975133, "must not take the wrong account's followers");
+		}
+		finally { utils.download = download; utils._resetUsernameCache(); }
+	});
+
+	await test("resolveProfile: a throttled numeric id recovers the handle from the cache", async () => {
+		const download = utils.download;
+		utils._resetUsernameCache();
+		// Prime the cache via a handle lookup, then throttle the id lookup.
+		utils.download = () => Promise.resolve(Buffer.from(JSON.stringify({ data: { user: {
+			id: "777", username: "jane", full_name: "Jane Doe", biography: "hi",
+			edge_followed_by: { count: 42 }, edge_follow: { count: 7 }
+		} } })));
+		try {
+			await utils.resolveProfile(["jane"], {}, null); // writes the cache
+			const api = fakeApi({ getUserInfo: (id, cb) => cb(new Error("parseAndCheckLogin got status code: 429")) });
+			const p = await utils.resolveProfile(["777"], {}, api);
+			assert.strictEqual(p.followers, 42, "the cached handle must let the public endpoint fill the profile");
+		}
+		finally { utils.download = download; utils._resetUsernameCache(); }
 	});
 
 	await test("uid: reports throttling instead of 'Could not find'", async () => {

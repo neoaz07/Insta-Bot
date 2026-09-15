@@ -11,7 +11,7 @@ events, roles, cooldowns and pluggable custom commands.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-c13584)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-3ddc84)
-![Tests](https://img.shields.io/badge/tests-150%20passing-3ddc84)
+![Tests](https://img.shields.io/badge/tests-164%20passing-3ddc84)
 
 [![View](https://img.shields.io/badge/View-Insta--Bot-2ea44f?logo=github)](https://github.com/lazyneoaz/Insta-Bot)
 [![Fork](https://img.shields.io/badge/Fork-repo-2ea44f?logo=github)](https://github.com/lazyneoaz/Insta-Bot/fork)
@@ -427,7 +427,12 @@ InstaBOT/
 -cmd reload mycommand  # reload after editing
 -cmd unload mycommand  # remove it from the registry
 -cmd load myevent --event
+-cmd install https://raw.githubusercontent.com/owner/repo/main/command.js
 ```
+
+URL installs automatically use the filename from the URL. If a downloaded file
+cannot load, for example because it requires an unavailable dependency, the bot
+reports the error and removes the broken file instead of failing silently.
 
 A command module looks like this:
 
